@@ -2,6 +2,11 @@
 
 #include "cube.h"
 
+#include <stdio.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 void cleanup(char *msg)         // single program exit point;
 {
     if(clientlogfile) clientlogfile->fflush();
@@ -997,6 +1002,22 @@ void sanitychecks()
 
 #define DEFAULTPROFILEPATH "profile"
 
+/* return current time (in seconds) */
+static double current_time(void)
+{
+    struct timeval tv;
+    struct timezone tz;
+    (void) gettimeofday(&tv, &tz);
+
+    return (double) tv.tv_sec + tv.tv_usec / 1000000.0;
+}
+
+/* return current time (in ms) */
+static unsigned long current_time_ms(void)
+{
+    return current_time() * 1000;
+}
+
 int main(int argc, char **argv)
 {
     DEBUGCODE(sanitychecks());
@@ -1014,6 +1035,8 @@ int main(int argc, char **argv)
     bool quitdirectly = false;
     char *initscript = NULL;
     char *initdemo = NULL;
+    FILE *csv_file = NULL;
+    static double prev_time = -1;
 
     if(bootclientlog) cvecprintf(*bootclientlog, "######## start logging: %s\n", timestring(true));
 
@@ -1044,7 +1067,19 @@ int main(int argc, char **argv)
             if(argv[i][0]=='-') switch(argv[i][1])
             {
                 case '-':
-                    if(!strcmp(argv[i], "--home"))
+                    if(!strncmp(argv[i], "--csv=", 6))
+                    {
+                        char *fname = &argv[i][6];
+                        csv_file = fopen(fname, "w");
+                        if (!csv_file)
+                        {
+                            int err = errno;
+                            clientlogf("Error opening CSV file: %s\n", strerror(err));
+                            return -err;
+                        }
+                        clientlogf("csv: %s\n", fname);
+                    }
+                    else if(!strcmp(argv[i], "--home"))
                     {
                         sethomedir(DEFAULTPROFILEPATH);
                     }
@@ -1301,6 +1336,7 @@ int main(int argc, char **argv)
     for(;;)
     {
         static int frames = 0;
+        static int my_frames = 0;
         static float fps = 10.0f;
         int millis = SDL_GetTicks() - clockrealbase;
         if(clockfix) millis = int(millis*(double(clockerror)/1000000));
@@ -1345,7 +1381,32 @@ int main(int argc, char **argv)
         if(frames>3 && !minimized)
         {
             gl_drawframe(screen->w, screen->h, fps<lowfps ? fps/lowfps : (fps>highfps ? fps/highfps : 1.0f), fps, elapsed);
-            if(frames>4) SDL_GL_SwapBuffers();
+            if(frames>4)
+            {
+                double t = current_time();
+                SDL_GL_SwapBuffers();
+                my_frames++;
+                if (csv_file)
+                {
+                    fprintf(csv_file, "%lu\n", current_time_ms());
+                    if (prev_time < 0)
+                    {
+                        prev_time = t;
+                    }
+                    if (t - prev_time >= 5.0)
+                    {
+                        double seconds = t - prev_time;
+                        double fps = my_frames / seconds;
+                        clientlogf("[%d] %d frames in %3.1f seconds = %6.3f FPS",
+                                    getpid(), my_frames, seconds, fps);
+                        fflush(stdout);
+                        fflush(csv_file);
+                        fsync(fileno(csv_file));
+                        prev_time = t;
+                        my_frames = 0;
+                    }
+                }
+            }
         }
 
         if(needsautoscreenshot)
@@ -1365,6 +1426,10 @@ int main(int argc, char **argv)
 #endif
         pollautodownloadresponse();
     }
+
+    fflush(csv_file);
+    fsync(fileno(csv_file));
+    fclose(csv_file);
 
     quit();
     return EXIT_SUCCESS;
